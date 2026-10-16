@@ -9,3 +9,7 @@ node_modules/
 dist/
 build/
 .DS_Store
+
+.venv/
+.pytest_cache/
+*.log

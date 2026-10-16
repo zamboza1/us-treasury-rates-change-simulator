@@ -1,13 +1,20 @@
 """
-Bond Pricing and Risk Metrics
-Calculates duration, DV01, and other fixed income analytics.
+Annual-compounding zero-coupon duration and DV01.
 """
+import math
+
+
+def validate_bond_inputs(yield_pct: float, tenor_years: float) -> None:
+    if not math.isfinite(yield_pct) or yield_pct <= -100:
+        raise ValueError('Yield must be finite and greater than -100%.')
+    if not math.isfinite(tenor_years) or tenor_years < 0:
+        raise ValueError('Tenor must be finite and nonnegative.')
 
 def calculate_duration(yield_pct: float, tenor_years: float) -> float:
     """
-    Calculate modified duration for a zero-coupon bond.
+    Calculate modified duration for an annual-compounding zero-coupon bond.
     
-    Modified Duration = Maturity / (1 + yield)
+    Modified Duration = Maturity / (1 + decimal yield)
     
     Args:
         yield_pct: Yield in percentage (e.g., 5.0 for 5%)
@@ -16,6 +23,7 @@ def calculate_duration(yield_pct: float, tenor_years: float) -> float:
     Returns:
         Modified duration in years
     """
+    validate_bond_inputs(yield_pct, tenor_years)
     if tenor_years == 0:
         return 0.0
     
@@ -30,15 +38,16 @@ def calculate_dv01(yield_pct: float, tenor_years: float) -> float:
     DV01 = Price × Modified Duration × 0.0001
     
     For a $100 face value zero-coupon bond:
-    Price = 100 / (1 + yield)^tenor
+    Price = 100 / (1 + decimal yield)^tenor
     
     Args:
         yield_pct: Yield in percentage (e.g., 5.0 for 5%)
         tenor_years: Time to maturity in years
     
     Returns:
-        DV01 in dollars (for $100 face value)
+        DV01 in dollars per basis point (for $100 face value)
     """
+    validate_bond_inputs(yield_pct, tenor_years)
     if tenor_years == 0:
         return 0.0
     

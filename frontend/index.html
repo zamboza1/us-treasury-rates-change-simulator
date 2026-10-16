@@ -14,7 +14,7 @@
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- Chart.js for High Performance Charts -->
+    <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <!-- Font: Inter -->
@@ -67,8 +67,8 @@
     </style>
 </head>
 
-<body class="h-screen overflow-hidden flex">
-    <div id="root" class="w-full h-full flex"></div>
+<body class="min-h-screen lg:h-screen lg:overflow-hidden flex">
+    <div id="root" class="w-full min-h-screen lg:h-full flex"></div>
 
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
@@ -101,6 +101,7 @@
                     </div>
                     <input
                         type="range"
+                        aria-label={label}
                         min={min} max={max} value={value}
                         onChange={(e) => onChange(parseFloat(e.target.value))}
                         className="w-full"
@@ -119,80 +120,62 @@
             const [shockType, setShockType] = useState("parallel");
             const [magnitude, setMagnitude] = useState(0);
             const [customShocks, setCustomShocks] = useState({ 2: 0, 5: 0, 10: 0, 30: 0 });
-            const [chartInstance, setChartInstance] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [retry, setRetry] = useState(0);
+            const [dataStatus, setDataStatus] = useState(null);
+            const chartInstance = useRef(null);
             const chartRef = useRef(null);
 
-            // API: Fetch base data once
+            // One cancellable request owns the date, curve and metrics together.
             useEffect(() => {
-                fetch("http://127.0.0.1:8081/api/analyze", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ type: "parallel", magnitude: 0 })
-                })
-                    .then(res => {
-                        if (!res.ok) {
-                            return res.json().then(err => Promise.reject(err));
+                const controller = new AbortController();
+                let active = true;
+                setLoading(true);
+                setError(null);
+                const timer = setTimeout(async () => {
+                    try {
+                        const shocks = Object.fromEntries(Object.entries(customShocks).map(([t, v]) => [t, Number(v)]));
+                        if (!Object.values(shocks).every(Number.isFinite)) {
+                            throw new Error("Enter a finite shock in basis points.");
                         }
-                        return res.json();
-                    })
-                    .then(json => {
-                        setError(null);
+                        const apiPort = new URLSearchParams(window.location.search).get('apiPort') || '8081';
+                        const apiBase = window.TREASURY_API_BASE || `http://${window.location.hostname || '127.0.0.1'}:${apiPort}`;
+                        const res = await fetch(`${apiBase}/api/analyze`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            signal: controller.signal,
+                            body: JSON.stringify({type: shockType, magnitude, pivot: 2.0, custom_shocks: shocks})
+                        });
+                        const json = await res.json();
+                        if (!res.ok) {
+                            const detail = Array.isArray(json.detail)
+                                ? json.detail.map(item => item.msg).join('; ') : json.detail;
+                            throw new Error(detail || `Request failed (${res.status}).`);
+                        }
+                        const original = json.original_curve;
+                        if (!original || !Object.keys(original).length || !json.shocked_curve || !json.metrics ||
+                            !Object.keys(original).every(t => Number.isFinite(original[t]) &&
+                                Number.isFinite(json.shocked_curve[t]) && json.metrics[t] &&
+                                Number.isFinite(json.metrics[t].yield) && Number.isFinite(json.metrics[t].delta_bps))) {
+                            throw new Error("No usable Treasury curve was returned.");
+                        }
+                        if (!active) return;
                         setDate(json.date);
-                        setData({
-                            original: json.original_curve,
-                            shocked: json.shocked_curve,
-                            metrics: json.metrics
-                        });
-                    })
-                    .catch(err => {
-                        console.error("API Error:", err);
-                        const errorMsg = err.detail || err.message || "Unable to fetch Treasury data. The backend service may be unavailable.";
-                        setError(errorMsg);
-                        setDate("Data Unavailable");
-                    });
-            }, []);
-
-            // API: Update on Scenario Change
-            useEffect(() => {
-                // Don't fetch if there's already an error
-                if (error) return;
-
-                const timer = setTimeout(() => {
-                    fetch("http://127.0.0.1:8081/api/analyze", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            type: shockType,
-                            magnitude: magnitude,
-                            pivot: 2.0, // hardcoded for steepener gui
-                            custom_shocks: customShocks
-                        })
-                    })
-                        .then(res => {
-                            if (!res.ok) {
-                                return res.json().then(err => Promise.reject(err));
-                            }
-                            return res.json();
-                        })
-                        .then(json => {
-                            setError(null);
-                            setData({
-                                original: json.original_curve,
-                                shocked: json.shocked_curve,
-                                metrics: json.metrics
-                            });
-                        })
-                        .catch(err => {
-                            console.error("Scenario update error:", err);
-                        });
-                }, 50); // Debounce slightly
-                return () => clearTimeout(timer);
-            }, [shockType, magnitude, customShocks, error]);
+                        setDataStatus(json.data_status || null);
+                        setData({original, shocked: json.shocked_curve, metrics: json.metrics});
+                    } catch (err) {
+                        if (active) setError(err.message || "Unable to fetch Treasury data.");
+                    } finally {
+                        if (active) setLoading(false);
+                    }
+                }, 50);
+                return () => { active = false; clearTimeout(timer); controller.abort(); };
+            }, [shockType, magnitude, customShocks, retry]);
 
             // Helper: Format Tenor (0.083 -> 1M, 30 -> 30Y)
             const formatTenor = (t) => {
                 const val = parseFloat(t);
-                if (val < 1) return Math.round(val * 12) + "M";
+                if (val < 1) return Number((val * 12).toFixed(2)) + "M";
                 return val + "Y";
             };
 
@@ -205,11 +188,11 @@
                 const origVals = tenors.map(t => data.original[t]);
                 const shockVals = tenors.map(t => data.shocked[t]);
 
-                if (chartInstance) {
-                    chartInstance.data.labels = labels;
-                    chartInstance.data.datasets[0].data = origVals;
-                    chartInstance.data.datasets[1].data = shockVals;
-                    chartInstance.update('none');
+                if (chartInstance.current) {
+                    chartInstance.current.data.labels = labels;
+                    chartInstance.current.data.datasets[0].data = origVals;
+                    chartInstance.current.data.datasets[1].data = shockVals;
+                    chartInstance.current.update('none');
                 } else {
                     const ctx = chartRef.current.getContext('2d');
                     const newChart = new Chart(ctx, {
@@ -254,21 +237,23 @@
                                 }
                             },
                             scales: {
-                                x: { grid: { color: '#1E293B' }, ticks: { color: '#64748B' } },
-                                y: { grid: { color: '#1E293B' }, ticks: { color: '#64748B' } }
+                                x: { title: { display: true, text: 'Maturity (categorical spacing)', color: '#94A3B8' }, grid: { color: '#1E293B' }, ticks: { color: '#64748B' } },
+                                y: { title: { display: true, text: 'Yield (%)', color: '#94A3B8' }, grid: { color: '#1E293B' }, ticks: { color: '#64748B' } }
                             },
                             animation: { duration: 0 }
                         }
                     });
-                    setChartInstance(newChart);
+                    chartInstance.current = newChart;
                 }
             }, [data, chartRef]);
 
+            useEffect(() => () => { if (chartInstance.current) chartInstance.current.destroy(); }, []);
+
             // Metric Helpers
             const getM = (tenor) => {
-                if (!data.metrics) return { yield: 0, delta: 0 };
+                if (loading || error || !data.metrics) return { yield: "—", delta: null };
                 const m = data.metrics[tenor + ".0"];
-                return m ? { yield: m.yield.toFixed(2) + "%", delta: (m.delta_bps).toFixed(1) } : { yield: "-", delta: "-" };
+                return m ? { yield: m.yield.toFixed(2) + "%", delta: (m.delta_bps).toFixed(1) } : { yield: "—", delta: null };
             };
 
             const m2 = getM(2);
@@ -276,26 +261,9 @@
             const m30 = getM(30);
 
             return (
-                <div className="flex w-full h-full bg-[#0F172A]">
-                    {/* Error Banner */}
-                    {error && (
-                        <div className="fixed top-0 left-0 right-0 z-50 bg-rose-900 border-b border-rose-700 p-4">
-                            <div className="max-w-7xl mx-auto flex items-start">
-                                <div className="flex-shrink-0">
-                                    <svg className="h-5 w-5 text-rose-400" viewBox="0 0 20 20" fill="currentColor">
-                                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-                                    </svg>
-                                </div>
-                                <div className="ml-3">
-                                    <h3 className="text-sm font-medium text-rose-200">Treasury Data Unavailable</h3>
-                                    <div className="mt-1 text-sm text-rose-300">{error}</div>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
+                <div className="flex flex-col lg:flex-row w-full min-h-screen lg:h-full bg-[#0F172A]">
                     {/* SIDEBAR */}
-                    <div className="w-80 glass-panel p-6 flex flex-col shrink-0 overflow-y-auto">
+                    <div className="w-full lg:w-80 glass-panel p-6 flex flex-col shrink-0 lg:overflow-y-auto">
                         <div className="flex items-center space-x-2 mb-8">
                             <div className="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]"></div>
                             <h1 className="text-xl font-bold tracking-tight text-white">US Treasury Rates Change Simulator</h1>
@@ -308,6 +276,7 @@
                                 {['parallel', 'steepener', 'custom'].map(mode => (
                                     <button
                                         key={mode}
+                                        aria-pressed={shockType === mode}
                                         onClick={() => { setShockType(mode); setMagnitude(0); }}
                                         className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${shockType === mode ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-300'
                                             }`}
@@ -324,8 +293,8 @@
                                     onChange={setMagnitude}
                                     help={
                                         shockType === 'parallel'
-                                            ? "Moves the whole curve up or down. For instance, aggressive Fed hikes or total market repricing."
-                                            : "Twists the curve around the 2Y. This can simulate inflation scares (long end up) or recession signals (inversion)."
+                                            ? "Adds the same basis-point change to every available maturity."
+                                            : "Keeps the 2Y yield unchanged. Shorter and longer maturities move in opposite directions."
                                     }
                                 />
                             ) : (
@@ -338,9 +307,11 @@
                                                 <input
                                                     type="number"
                                                     placeholder="0"
-                                                    className="bg-slate-900 border border-slate-700 rounded p-2 text-sm text-sky-400 focus:outline-none focus:border-sky-500"
+                                                    aria-label={`${t}Y shock (bps)`}
+                                                    value={customShocks[t]}
+                                                    className="w-full min-w-0 bg-slate-900 border border-slate-700 rounded p-2 text-sm text-sky-400 focus:outline-none focus:border-sky-500"
                                                     onChange={(e) => {
-                                                        const val = parseFloat(e.target.value) || 0;
+                                                        const val = e.target.value;
                                                         setCustomShocks(prev => ({ ...prev, [t]: val }));
                                                     }}
                                                 />
@@ -356,30 +327,39 @@
 
                         <div className="mt-auto">
                             <div className="p-4 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-400">
-                                <span className="block mb-2 font-mono text-emerald-400">● LIVE FEED</span>
-                                Data loaded: {date}<br />
-                                Source: US Treasury
+                                <span className="block mb-2 font-mono text-sky-400" role="status">
+                                    {loading ? "Loading scenario…" : error ? "Scenario unavailable" : dataStatus && dataStatus.cache_status === 'stale' ? "STALE CACHE — refresh failed" : "Treasury daily observations"}
+                                </span>
+                                Observation date: {date === 'Loading...' && error ? 'Unavailable' : date}<br />
+                                Source: US Treasury par yields<br />
+                                <span className="block mt-2">Negative scenario yields are allowed. Risk estimates use an annual-compounding zero-coupon model with $100 face value.</span>
                             </div>
                         </div>
                     </div>
 
                     {/* MAIN CONTENT */}
-                    <div className="flex-1 flex flex-col p-8 overflow-hidden relative">
+                    <div className="flex-1 min-w-0 flex flex-col p-4 sm:p-8 lg:overflow-y-auto relative" aria-busy={loading}>
+                        {error && <div role="alert" className="mb-4 p-4 rounded-lg bg-rose-900 text-rose-100">
+                            <p>Scenario unavailable: {error}</p>
+                            <button className="mt-2 underline" onClick={() => setRetry(value => value + 1)}>Retry</button>
+                        </div>}
+                        {loading && <p className="mb-4 text-sky-300" role="status">Loading scenario…</p>}
                         {/* HEADER METRICS */}
-                        <div className="grid grid-cols-3 gap-6 mb-8 shrink-0">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 shrink-0">
                             <MetricCard label="2Y Yield" value={m2.yield} delta={m2.delta} />
                             <MetricCard label="10Y Yield" value={m10.yield} delta={m10.delta} />
                             <MetricCard label="30Y Yield" value={m30.yield} delta={m30.delta} />
                         </div>
 
                         {/* CHART AREA */}
-                        <div className="flex-1 glass rounded-2xl p-6 relative flex flex-col min-h-0">
-                            <div className="absolute top-6 left-6 z-10">
+                        <div className="flex-1 glass rounded-2xl p-4 sm:p-6 relative flex flex-col min-h-[420px]">
+                            <div className="mb-4">
                                 <h2 className="text-lg font-semibold text-white">Yield Curve Structure</h2>
-                                <p className="text-slate-400 text-sm">Visualizing term structure dynamics</p>
+                                <p className="text-slate-400 text-sm">Par yields in percent; scenario changes in basis points</p>
                             </div>
-                            <div className="flex-1 mt-8 relative w-full h-full">
-                                <canvas ref={chartRef}></canvas>
+                            <div className="flex-1 relative w-full min-h-[300px]">
+                                <canvas ref={chartRef} role="img" aria-label="Baseline and scenario Treasury par yields by maturity" style={{visibility: loading || error ? 'hidden' : 'visible'}}></canvas>
+                                {(loading || error) && <p className="absolute inset-0 flex items-center justify-center text-slate-400">{loading ? 'Waiting for scenario results…' : 'No current scenario result.'}</p>}
                             </div>
                         </div>
                     </div>

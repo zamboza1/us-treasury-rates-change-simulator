@@ -1,29 +1,50 @@
 #!/bin/bash
+set -e
+cd "$(dirname "$0")"
 
-# --- Rates Change Playground Startup Script ---
+PYTHON="${PYTHON:-python3}"
+BACKEND_PORT="${BACKEND_PORT:-8081}"
+FRONTEND_PORT="${FRONTEND_PORT:-3001}"
 
-echo "🚀 Starting US Treasury Rates Change Simulator..."
+"$PYTHON" -c 'import fastapi, uvicorn, requests, pydantic' || {
+    echo 'Install requirements.txt in your Python environment first.' >&2
+    exit 1
+}
+# Refuse occupied ports. Never terminate unrelated services.
+"$PYTHON" - "$BACKEND_PORT" "$FRONTEND_PORT" <<'PY'
+import socket, sys
+sockets = []
+try:
+    for value in sys.argv[1:]:
+        port = int(value)
+        if not 1 <= port <= 65535:
+            raise ValueError('Ports must be between 1 and 65535.')
+        server = socket.socket()
+        sockets.append(server)
+        server.bind(('127.0.0.1', port))
+except (OSError, ValueError) as exc:
+    sys.exit(f'Cannot start servers: {exc}')
+finally:
+    for server in sockets:
+        server.close()
+PY
 
-# 1. Install dependencies
-echo "📦 Installing dependencies..."
-/opt/anaconda3/bin/pip install -r requirements.txt -q
+BACKEND_PID=''
+FRONTEND_PID=''
+cleanup() {
+    [ -z "$BACKEND_PID" ] || kill "$BACKEND_PID" 2>/dev/null || true
+    [ -z "$FRONTEND_PID" ] || kill "$FRONTEND_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
-# 2. Cleanup existing processes (port 8081 and 3001)
-echo "🧹 Cleaning up old processes..."
-lsof -ti:8081 | xargs kill -9 2>/dev/null
-lsof -ti:3001 | xargs kill -9 2>/dev/null
-
-# 3. Start Backend (FastAPI)
-echo "🔗 Starting Backend on port 8081..."
-/opt/anaconda3/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8081 > backend.log 2>&1 &
+"$PYTHON" -m uvicorn backend.main:app --host 127.0.0.1 --port "$BACKEND_PORT" &
 BACKEND_PID=$!
-
-# 4. Start Frontend (HTTP Server)
-echo "🎨 Starting Frontend on port 3001..."
-echo "📍 Access the app at: http://localhost:3001"
-/opt/anaconda3/bin/python -m http.server 3001 --directory frontend > frontend.log 2>&1 &
+"$PYTHON" -m http.server "$FRONTEND_PORT" --bind 127.0.0.1 --directory frontend &
 FRONTEND_PID=$!
-
-# 5. Handle shutdown
-trap "kill $BACKEND_PID $FRONTEND_PID; echo '🛑 Servers stopped.'; exit" INT TERM
-wait
+echo "Simulator: http://127.0.0.1:$FRONTEND_PORT/?apiPort=$BACKEND_PORT"
+# Stop our companion server if either process exits.
+while kill -0 "$BACKEND_PID" 2>/dev/null && kill -0 "$FRONTEND_PID" 2>/dev/null; do
+    sleep 1
+done
+exit 1
